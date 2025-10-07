@@ -6,3 +6,4 @@ pandas
 tqdm
 opencv-python
 scikit-learn
+os
