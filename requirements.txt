@@ -1,0 +1,8 @@
+kaggle
+pyyaml
+pillow
+imagehash
+pandas
+tqdm
+opencv-python
+scikit-learn
