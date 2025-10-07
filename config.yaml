@@ -1,0 +1,48 @@
+project:
+  name: "waste-preproc-rl"
+  version: "1.0"
+
+paths:
+  raw_data: "data/raw"
+  unified_data: "data/unified"
+  processed_data: "data/processed"
+  manifest_file: "data/unified/manifest.csv"
+
+datasets:
+  trashnet:
+    path: "data/raw/trashnet"
+    classes: ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
+    
+  garbage12:
+    path: "data/raw/garbage12"
+    class_mapping:
+      paper: "paper"
+      cardboard: "cardboard" 
+      plastic: "plastic"
+      metal: "metal"
+      glass: "glass"
+      battery: "battery"
+      clothes: "clothes"
+      shoes: "shoes"
+      biological: "biological"
+
+unified_classes:
+  - "cardboard"
+  - "glass" 
+  - "metal"
+  - "paper"
+  - "plastic"
+  - "trash"
+  - "battery"
+  - "lamp"
+  - "clothes"
+  - "shoes"
+  - "biological"
+
+preprocessing:
+  target_size: [224, 224]
+  quality_threshold: 0.5
+  split_ratios:
+    train: 0.7
+    val: 0.15
+    test: 0.15
