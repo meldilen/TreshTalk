@@ -1,10 +1,9 @@
-import os
-import csv
 import pandas as pd
 from pathlib import Path
 from PIL import Image
 import numpy as np
 from sklearn.model_selection import train_test_split
+from image_quality_analyzer import ImageQualityAnalyzer
 
 
 class DatasetUnifier:
@@ -12,6 +11,7 @@ class DatasetUnifier:
         self.raw_dir = Path(raw_dir)
         self.unified_dir = Path(unified_dir)
         self.manifest_path = self.unified_dir / "manifest.csv"
+        self.quality_analyzer = ImageQualityAnalyzer()
 
         self.unified_classes = {
             'cardboard', 'paper', 'plastic', 'metal', 'glass', 'trash',
@@ -19,12 +19,11 @@ class DatasetUnifier:
         }
 
         self.class_mapping = self._build_class_mapping()
-        
-        # Конфигурация для каждого датасета
+
         self.dataset_configs = self._build_dataset_configs()
 
     def _build_class_mapping(self):
-        """Создает маппинг классов из разных датасетов к унифицированным"""
+        """Build class mapping from different datasets to unified classes"""
         mapping = {}
 
         mapping['trashnet'] = {
@@ -52,7 +51,7 @@ class DatasetUnifier:
         }
 
         mapping['WaRP'] = {
-            # Пластик - все bottle и canister
+            # Plastic - all bottle and canister
             'bottle-blue': 'plastic',
             'bottle-blue-full': 'plastic',
             'bottle-blue5l': 'plastic',
@@ -72,19 +71,19 @@ class DatasetUnifier:
             'bottle-yogurt': 'plastic',
             'canister': 'plastic',
 
-            # Стекло
+            # Glass
             'glass-dark': 'glass',
             'glass-green': 'glass',
             'glass-transp': 'glass',
 
-            # Металл
+            # Metal
             'cans': 'metal',
 
-            # Картон
+            # Cardboard
             'juice-cardboard': 'cardboard',
             'milk-cardboard': 'cardboard',
 
-            # Моющие средства (пластик)
+            # Detergents (plastic)
             'detergent': 'plastic',
             'detergent-box': 'plastic',
             'detergent-color': 'plastic',
@@ -119,7 +118,7 @@ class DatasetUnifier:
             'Paper': 'paper',
             'Plastic': 'plastic',
             'Textile Trash': 'clothes',
-            'Vegetation': 'biological'  # Исправлена опечатка
+            'Vegetation': 'biological'
         }
 
         mapping['garbage_classification_2'] = {
@@ -147,7 +146,7 @@ class DatasetUnifier:
         return mapping
 
     def _build_dataset_configs(self):
-        """Создает конфигурацию для каждого датасета"""
+        """Create configuration for each dataset"""
         return {
             'trashnet': {
                 'path': 'trashnet/dataset-resized',
@@ -191,87 +190,21 @@ class DatasetUnifier:
             }
         }
 
-    def _calculate_image_metrics(self, image_path):
-        """Вычисляет метрики качества изображения"""
-        try:
-            with Image.open(image_path) as img:
-                img_array = np.array(img)
-
-                # Базовые метрики
-                width, height = img.size
-                format_type = img.format if img.format else 'UNKNOWN'
-
-                # Яркость (среднее значение пикселей в grayscale)
-                if len(img_array.shape) == 3:
-                    gray = np.mean(img_array, axis=2)
-                else:
-                    gray = img_array
-                brightness = np.mean(gray) / 255.0
-
-                # Контраст (стандартное отклонение)
-                contrast = np.std(gray) / 255.0
-
-                # Edge score (простой детектор границ)
-                dy, dx = np.gradient(gray.astype(float))
-                edge_score = np.mean(np.sqrt(dx**2 + dy**2)) / 255.0
-
-                # Noise score (вариация в маленьких участках)
-                noise_score = self._estimate_noise(gray)
-
-                # Общий quality score
-                quality_score = (
-                    0.3 * (1 - abs(brightness - 0.5)) +  # Яркость близка к 0.5
-                    0.3 * min(contrast * 3, 1.0) +       # Хороший контраст
-                    0.2 * min(edge_score * 5, 1.0) +     # Четкие границы
-                    0.2 * (1 - min(noise_score * 10, 1.0))  # Низкий шум
-                )
-
-                return {
-                    'width': width,
-                    'height': height,
-                    'format': format_type,
-                    'quality_score': round(quality_score, 4),
-                    'brightness_score': round(brightness, 4),
-                    'contrast_score': round(contrast, 4),
-                    'edge_score': round(edge_score, 4),
-                    'noise_score': round(noise_score, 4)
-                }
-        except Exception as e:
-            print(f"Error processing {image_path}: {e}")
-            return None
-
-    def _estimate_noise(self, gray_image):
-        """Оценивает уровень шума в изображении"""
-        try:
-            # Простой метод оценки шума через вариацию в маленьких блоках
-            h, w = gray_image.shape
-            block_size = 8
-            variances = []
-
-            for i in range(0, h - block_size, block_size):
-                for j in range(0, w - block_size, block_size):
-                    block = gray_image[i:i+block_size, j:j+block_size]
-                    variances.append(np.var(block))
-
-            return np.mean(variances) / 255.0 if variances else 0.0
-        except:
-            return 0.0
-
     def _process_dataset(self, dataset_key):
-        """Универсальная функция для обработки любого датасета"""
+        """Universal function for processing any dataset"""
         config = self.dataset_configs.get(dataset_key)
         if not config:
-            print(f"❌ Конфигурация для {dataset_key} не найдена!")
+            print(f"❌ Configuration for {dataset_key} not found!")
             return pd.DataFrame()
 
         dataset_path = self.raw_dir / config['path']
         records = []
 
         if not dataset_path.exists():
-            print(f"❌ Путь не найден: {dataset_path}")
+            print(f"❌ Path not found: {dataset_path}")
             return pd.DataFrame()
 
-        print(f"📁 Обрабатываем {dataset_key} из: {dataset_path}")
+        print(f"📁 Processing {dataset_key} from: {dataset_path}")
 
         total_images = 0
         classes_processed = 0
@@ -279,55 +212,92 @@ class DatasetUnifier:
         for class_dir in dataset_path.iterdir():
             if class_dir.is_dir():
                 original_class = class_dir.name
-                
-                # Для некоторых датасетов приводим к нижнему регистру
+
                 if dataset_key in ['12classes', 'garbage_classification_1', 'garbage_classification_2', 'trash_type', 'garbage_dataset']:
                     original_class = original_class.lower()
-                
-                unified_class = self.class_mapping[config['prefix']].get(original_class)
+
+                unified_class = self.class_mapping[config['prefix']].get(
+                    original_class)
 
                 if not unified_class:
-                    print(f"⚠️ Неизвестный класс в {dataset_key}: {original_class}")
+                    print(
+                        f"⚠️ Unknown class in {dataset_key}: {original_class}")
                     continue
 
-                print(f"  📂 Обрабатываем класс: {original_class} -> {unified_class}")
+                print(
+                    f"  📂 Processing class: {original_class} -> {unified_class}")
 
                 image_count = 0
                 for pattern in config['file_patterns']:
                     for img_path in class_dir.glob(pattern):
-                        metrics = self._calculate_image_metrics(img_path)
+                        metrics = self.quality_analyzer.analyze_image(img_path)
                         if not metrics:
                             continue
 
-                        # Создаем уникальный ID изображения
+                        # Create unique image ID
                         image_id = f"{config['prefix']}_{original_class.replace(' ', '_')}_{img_path.stem}"
-                        
+
                         records.append({
+                            # Basic information (5)
                             'image_id': image_id,
                             'file_path': str(img_path.relative_to(self.raw_dir)),
                             'dataset': config['prefix'],
-                            'format': metrics['format'],
                             'unified_class': unified_class,
+                            'split': '',
+
+                            # Basic size metrics (5)
                             'width': metrics['width'],
                             'height': metrics['height'],
-                            'split': '',
+                            'aspect_ratio': metrics['aspect_ratio'],
+                            'total_pixels': metrics['total_pixels'],
+                            'channels': metrics['channels'],
+
+                            # Main quality metrics (6)
                             'quality_score': metrics['quality_score'],
                             'brightness_score': metrics['brightness_score'],
                             'contrast_score': metrics['contrast_score'],
                             'edge_score': metrics['edge_score'],
-                            'noise_score': metrics['noise_score']
+                            'noise_score': metrics['noise_score'],
+                            'blur_score': metrics['blur_score'],
+
+                            # Color metrics (4)
+                            'saturation': metrics['saturation'],
+                            'color_balance_bias': metrics['color_balance_bias'],
+                            'is_color_cast': metrics['is_color_cast'],
+                            'is_monochrome': metrics['is_monochrome'],
+
+                            # Exposure metrics (3)
+                            'overexposed_ratio': metrics['overexposed_ratio'],
+                            'underexposed_ratio': metrics['underexposed_ratio'],
+                            'dynamic_range': metrics['dynamic_range'],
+
+                            # Problem detection for RL (10)
+                            'needs_contrast_boost': metrics['needs_contrast_boost'],
+                            'needs_brightness_fix': metrics['needs_brightness_fix'],
+                            'needs_sharpening': metrics['needs_sharpening'],
+                            'needs_denoising': metrics['needs_denoising'],
+                            'needs_deblurring': metrics['needs_deblurring'],
+                            'needs_saturation_boost': metrics['needs_saturation_boost'],
+                            'needs_color_balance': metrics['needs_color_balance'],
+                            'needs_exposure_fix': metrics['needs_exposure_fix'],
+                            'is_low_entropy': metrics['is_low_entropy'],
+                            'has_color_cast': metrics['has_color_cast'],
+
+                            # RL feature (1)
+                            'quality_level': metrics['quality_level']
                         })
                         image_count += 1
                         total_images += 1
 
-                print(f"    ✅ {original_class}: {image_count} изображений")
+                print(f"    ✅ {original_class}: {image_count} images")
                 classes_processed += 1
 
-        print(f"🎉 Обработка {dataset_key} завершена: {total_images} изображений в {classes_processed} классах")
+        print(
+            f"🎉 Processing {dataset_key} completed: {total_images} images in {classes_processed} classes")
         return pd.DataFrame(records)
-    
+
     def assign_splits(self, df, train_size=0.6, val_size=0.2, test_size=0.2):
-        """Назначает train/val/test splits с стратификацией по классам"""
+        """Assign train/val/test splits with class stratification"""
         if len(df) == 0:
             return df
 
@@ -352,14 +322,14 @@ class DatasetUnifier:
         return df
 
     def unify_datasets(self):
-        """Основной метод объединения датасетов"""
-        print("Starting dataset unification...")
+        """Main method for dataset unification"""
+        print("Starting dataset unification with advanced quality analysis...")
 
         all_data = pd.DataFrame()
 
         datasets_to_process = [
             'trashnet',
-            '12classes', 
+            '12classes',
             'WaRP',
             'garbage_classification_1',
             'trash_type',
@@ -386,21 +356,46 @@ class DatasetUnifier:
 
         print(f"Saving manifest to {self.manifest_path}...")
         self.unified_dir.mkdir(parents=True, exist_ok=True)
-        
+
         all_data.to_csv(self.manifest_path, index=False, encoding='utf-8')
 
-        # Статистика
+        # Extended statistics
         print("\n=== Dataset Statistics ===")
         print(f"Total images: {len(all_data)}")
         print(f"By dataset:\n{all_data['dataset'].value_counts()}")
         print(f"By class:\n{all_data['unified_class'].value_counts()}")
         print(f"By split:\n{all_data['split'].value_counts()}")
 
-        # Качество изображений
-        print(f"\nImage quality stats:")
+        # Image quality
+        print(f"\n=== Image Quality Statistics ===")
         print(f"Average quality score: {all_data['quality_score'].mean():.3f}")
         print(f"Average brightness: {all_data['brightness_score'].mean():.3f}")
         print(f"Average contrast: {all_data['contrast_score'].mean():.3f}")
+        print(f"Average saturation: {all_data['saturation'].mean():.3f}")
+        print(f"Average noise: {all_data['noise_score'].mean():.3f}")
+        print(f"Average blur: {all_data['blur_score'].mean():.3f}")
+
+        # RL statistics
+        print(f"\n=== RL-specific Statistics ===")
+        print(
+            f"Images needing processing: {all_data['needs_any_processing'].sum()} ({all_data['needs_any_processing'].mean()*100:.1f}%)")
+        print(f"Quality level distribution:")
+        quality_dist = all_data['quality_level'].value_counts().sort_index()
+        for level, count in quality_dist.items():
+            level_names = {0: 'Low', 1: 'Medium', 2: 'High'}
+            print(
+                f"  - {level_names[level]}: {count} images ({count/len(all_data)*100:.1f}%)")
+
+        # Problem statistics
+        print(f"\n=== Common Problems ===")
+        problem_cols = [col for col in all_data.columns if col.startswith(
+            'needs_') or col.startswith('has_')]
+        problem_stats = []
+        for col in problem_cols:
+            count = all_data[col].sum()
+            if count > 0:
+                percentage = count/len(all_data)*100
+                problem_stats.append((col, count, percentage))
 
         return len(all_data)
 
