@@ -15,10 +15,13 @@ class DatasetUnifier:
 
         self.unified_classes = {
             'cardboard', 'paper', 'plastic', 'metal', 'glass', 'trash',
-            'battery', 'clothes', 'shoes', 'lamp', 'biological'
+            'battery', 'clothes', 'lamp', 'biological'
         }
 
         self.class_mapping = self._build_class_mapping()
+        
+        # Конфигурация для каждого датасета
+        self.dataset_configs = self._build_dataset_configs()
 
     def _build_class_mapping(self):
         """Создает маппинг классов из разных датасетов к унифицированным"""
@@ -44,11 +47,10 @@ class DatasetUnifier:
             'white-glass': 'glass',
             'battery': 'battery',
             'clothes': 'clothes',
-            'shoes': 'shoes',
+            'shoes': 'clothes',
             'biological': 'biological'
         }
 
-        # WaRP mapping (упрощенный)
         mapping['WaRP'] = {
             # Пластик - все bottle и canister
             'bottle-blue': 'plastic',
@@ -90,7 +92,104 @@ class DatasetUnifier:
             'detergent-white': 'plastic'
         }
 
+        mapping['garbage_classification_1'] = {
+            'cardboard': 'cardboard',
+            'glass': 'glass',
+            'metal': 'metal',
+            'paper': 'paper',
+            'plastic': 'plastic',
+            'trash': 'trash'
+        }
+
+        mapping['trash_type'] = {
+            'cardboard': 'cardboard',
+            'glass': 'glass',
+            'metal': 'metal',
+            'paper': 'paper',
+            'plastic': 'plastic',
+            'trash': 'trash'
+        }
+
+        mapping['realwaste'] = {
+            'Cardboard': 'cardboard',
+            'Food Organics': 'biological',
+            'Glass': 'glass',
+            'Metal': 'metal',
+            'Miscellaneous Trash': 'trash',
+            'Paper': 'paper',
+            'Plastic': 'plastic',
+            'Textile Trash': 'clothes',
+            'Vegetation': 'biological'  # Исправлена опечатка
+        }
+
+        mapping['garbage_classification_2'] = {
+            'cardboard': 'cardboard',
+            'glass': 'glass',
+            'metal': 'metal',
+            'paper': 'paper',
+            'plastic': 'plastic',
+            'trash': 'trash'
+        }
+
+        mapping['garbage_dataset'] = {
+            'battery': 'battery',
+            'biological': 'biological',
+            'cardboard': 'cardboard',
+            'clothes': 'clothes',
+            'glass': 'glass',
+            'metal': 'metal',
+            'paper': 'paper',
+            'plastic': 'plastic',
+            'shoes': 'clothes',
+            'trash': 'trash'
+        }
+
         return mapping
+
+    def _build_dataset_configs(self):
+        """Создает конфигурацию для каждого датасета"""
+        return {
+            'trashnet': {
+                'path': 'trashnet/dataset-resized',
+                'prefix': 'trashnet',
+                'file_patterns': ['*.jpg']
+            },
+            '12classes': {
+                'path': '12classes/garbage_classification',
+                'prefix': '12classes',
+                'file_patterns': ['*.jpg', '*.jpeg', '*.png']
+            },
+            'WaRP': {
+                'path': 'WaRP/merged_crops',
+                'prefix': 'WaRP',
+                'file_patterns': ['*.jpg', '*.jpeg', '*.png']
+            },
+            'garbage_classification_1': {
+                'path': 'garbage_classification_1',
+                'prefix': 'garbage_classification_1',
+                'file_patterns': ['*.jpg', '*.jpeg', '*.png']
+            },
+            'trash_type': {
+                'path': 'trash_type/TrashType_Image_Dataset',
+                'prefix': 'trash_type',
+                'file_patterns': ['*.jpg', '*.jpeg', '*.png']
+            },
+            'realwaste': {
+                'path': 'realwaste',
+                'prefix': 'realwaste',
+                'file_patterns': ['*.jpg', '*.jpeg', '*.png']
+            },
+            'garbage_classification_2': {
+                'path': 'garbage_classification_2',
+                'prefix': 'garbage_classification_2',
+                'file_patterns': ['*.jpg', '*.jpeg', '*.png']
+            },
+            'garbage_dataset': {
+                'path': 'garbage_dataset/garbage-dataset',
+                'prefix': 'garbage_dataset',
+                'file_patterns': ['*.jpg', '*.jpeg', '*.png']
+            }
+        }
 
     def _calculate_image_metrics(self, image_path):
         """Вычисляет метрики качества изображения"""
@@ -158,152 +257,80 @@ class DatasetUnifier:
         except:
             return 0.0
 
-    def _process_trashnet(self):
-        """Обрабатывает TrashNet датасет"""
-        trashnet_path = self.raw_dir / "trashnet" / "dataset-resized"
+    def _process_dataset(self, dataset_key):
+        """Универсальная функция для обработки любого датасета"""
+        config = self.dataset_configs.get(dataset_key)
+        if not config:
+            print(f"❌ Конфигурация для {dataset_key} не найдена!")
+            return pd.DataFrame()
+
+        dataset_path = self.raw_dir / config['path']
         records = []
 
-        if not trashnet_path.exists():
-            print(f"TrashNet path not found: {trashnet_path}")
-            return pd.DataFrame(records)
+        if not dataset_path.exists():
+            print(f"❌ Путь не найден: {dataset_path}")
+            return pd.DataFrame()
 
-        for class_dir in trashnet_path.iterdir():
+        print(f"📁 Обрабатываем {dataset_key} из: {dataset_path}")
+
+        total_images = 0
+        classes_processed = 0
+
+        for class_dir in dataset_path.iterdir():
             if class_dir.is_dir():
                 original_class = class_dir.name
-                unified_class = self.class_mapping['trashnet'].get(
-                    original_class)
+                
+                # Для некоторых датасетов приводим к нижнему регистру
+                if dataset_key in ['12classes', 'garbage_classification_1', 'garbage_classification_2', 'trash_type', 'garbage_dataset']:
+                    original_class = original_class.lower()
+                
+                unified_class = self.class_mapping[config['prefix']].get(original_class)
 
                 if not unified_class:
+                    print(f"⚠️ Неизвестный класс в {dataset_key}: {original_class}")
                     continue
 
-                for img_path in class_dir.glob("*.jpg"):
-                    metrics = self._calculate_image_metrics(img_path)
-                    if not metrics:
-                        continue
-
-                    records.append({
-                        'image_id': f"trashnet_{img_path.stem}",
-                        'file_path': str(img_path.relative_to(self.raw_dir)),
-                        'dataset': 'trashnet',
-                        'format': metrics['format'],
-                        'unified_class': unified_class,
-                        'width': metrics['width'],
-                        'height': metrics['height'],
-                        'split': '',  # Будет заполнено позже
-                        'quality_score': metrics['quality_score'],
-                        'brightness_score': metrics['brightness_score'],
-                        'contrast_score': metrics['contrast_score'],
-                        'edge_score': metrics['edge_score'],
-                        'noise_score': metrics['noise_score']
-                    })
-
-        return pd.DataFrame(records)
-
-    def _process_garbage12(self):
-        """Обрабатывает Garbage Classification (12 classes) датасет"""
-        garbage12_path = self.raw_dir / "12classes" / "garbage_classification"
-        records = []
-
-        if not garbage12_path.exists():
-            print(f"Garbage12 path not found: {garbage12_path}")
-            return pd.DataFrame(records)
-
-        for class_dir in garbage12_path.iterdir():
-            if class_dir.is_dir():
-                original_class = class_dir.name.lower()
-                unified_class = self.class_mapping['12classes'].get(
-                    original_class)
-
-                if not unified_class:
-                    print(f"Unknown class in garbage12: {original_class}")
-                    continue
-
-                for img_path in class_dir.glob("*.*"):
-                    if img_path.suffix.lower() not in ['.jpg', '.jpeg', '.png']:
-                        continue
-
-                    metrics = self._calculate_image_metrics(img_path)
-                    if not metrics:
-                        continue
-
-                    records.append({
-                        'image_id': f"garbage12_{img_path.stem}",
-                        'file_path': str(img_path.relative_to(self.raw_dir)),
-                        'dataset': '12classes',
-                        'format': metrics['format'],
-                        'unified_class': unified_class,
-                        'width': metrics['width'],
-                        'height': metrics['height'],
-                        'split': '',
-                        'quality_score': metrics['quality_score'],
-                        'brightness_score': metrics['brightness_score'],
-                        'contrast_score': metrics['contrast_score'],
-                        'edge_score': metrics['edge_score'],
-                        'noise_score': metrics['noise_score']
-                    })
-
-        return pd.DataFrame(records)
-
-    def _process_warp(self):
-        """Обрабатывает WaRP датасет из merged_crops"""
-        warp_path = self.raw_dir / "WaRP" / "merged_crops"
-        records = []
-
-        if not warp_path.exists():
-            print(f"WaRP merged_crops path not found: {warp_path}")
-            return pd.DataFrame(records)
-
-        # Обрабатываем каждую папку с классами в merged_crops
-        for class_dir in warp_path.iterdir():
-            if class_dir.is_dir():
-                original_class = class_dir.name
-                unified_class = self.class_mapping['WaRP'].get(original_class)
-
-                if not unified_class:
-                    print(f"Unknown class in WaRP merged_crops: {original_class}")
-                    continue
-
-                print(
-                    f"Processing WaRP class: {original_class} -> {unified_class}")
+                print(f"  📂 Обрабатываем класс: {original_class} -> {unified_class}")
 
                 image_count = 0
-                # Обрабатываем все изображения в папке класса
-                for img_path in class_dir.glob("*.*"):
-                    if img_path.suffix.lower() not in ['.jpg', '.jpeg', '.png']:
-                        continue
+                for pattern in config['file_patterns']:
+                    for img_path in class_dir.glob(pattern):
+                        metrics = self._calculate_image_metrics(img_path)
+                        if not metrics:
+                            continue
 
-                    metrics = self._calculate_image_metrics(img_path)
-                    if not metrics:
-                        continue
+                        # Создаем уникальный ID изображения
+                        image_id = f"{config['prefix']}_{original_class.replace(' ', '_')}_{img_path.stem}"
+                        
+                        records.append({
+                            'image_id': image_id,
+                            'file_path': str(img_path.relative_to(self.raw_dir)),
+                            'dataset': config['prefix'],
+                            'format': metrics['format'],
+                            'unified_class': unified_class,
+                            'width': metrics['width'],
+                            'height': metrics['height'],
+                            'split': '',
+                            'quality_score': metrics['quality_score'],
+                            'brightness_score': metrics['brightness_score'],
+                            'contrast_score': metrics['contrast_score'],
+                            'edge_score': metrics['edge_score'],
+                            'noise_score': metrics['noise_score']
+                        })
+                        image_count += 1
+                        total_images += 1
 
-                    records.append({
-                        'image_id': f"warp_{original_class}_{img_path.stem}",
-                        'file_path': str(img_path.relative_to(self.raw_dir)),
-                        'dataset': 'WaRP',
-                        'format': metrics['format'],
-                        'unified_class': unified_class,
-                        'width': metrics['width'],
-                        'height': metrics['height'],
-                        'split': '',
-                        'quality_score': metrics['quality_score'],
-                        'brightness_score': metrics['brightness_score'],
-                        'contrast_score': metrics['contrast_score'],
-                        'edge_score': metrics['edge_score'],
-                        'noise_score': metrics['noise_score']
-                    })
-                    image_count += 1
+                print(f"    ✅ {original_class}: {image_count} изображений")
+                classes_processed += 1
 
-                print(f"  - {original_class}: {image_count} images")
-
-        print(f"Processed {len(records)} total images from WaRP merged_crops")
+        print(f"🎉 Обработка {dataset_key} завершена: {total_images} изображений в {classes_processed} классах")
         return pd.DataFrame(records)
-
-    def assign_splits(self, df, test_size=0.2, val_size=0.1):
+    
+    def assign_splits(self, df, train_size=0.6, val_size=0.2, test_size=0.2):
         """Назначает train/val/test splits с стратификацией по классам"""
         if len(df) == 0:
             return df
 
-        # Сначала разделяем на train+val и test
         train_val_idx, test_idx = train_test_split(
             df.index,
             test_size=test_size,
@@ -311,7 +338,6 @@ class DatasetUnifier:
             random_state=42
         )
 
-        # Затем разделяем train+val на train и val
         train_idx, val_idx = train_test_split(
             train_val_idx,
             test_size=val_size/(1-test_size),
@@ -331,19 +357,25 @@ class DatasetUnifier:
 
         all_data = pd.DataFrame()
 
-        print("Processing TrashNet...")
-        trashnet_df = self._process_trashnet()
-        all_data = pd.concat([all_data, trashnet_df], ignore_index=True)
+        datasets_to_process = [
+            'trashnet',
+            '12classes', 
+            'WaRP',
+            'garbage_classification_1',
+            'trash_type',
+            'realwaste',
+            'garbage_classification_2',
+            'garbage_dataset'
+        ]
 
-        print("Processing Garbage12...")
-        garbage12_df = self._process_garbage12()
-        all_data = pd.concat([all_data, garbage12_df], ignore_index=True)
+        for dataset_key in datasets_to_process:
+            print(f"\n{'='*50}")
+            df = self._process_dataset(dataset_key)
+            all_data = pd.concat([all_data, df], ignore_index=True)
+            print(f"✅ {dataset_key}: {len(df)} images")
+            print(f"{'='*50}")
 
-        print("Processing WaRP...")
-        warp_df = self._process_warp()
-        all_data = pd.concat([all_data, warp_df], ignore_index=True)
-
-        print(f"Total records collected: {len(all_data)}")
+        print(f"\nTotal records collected: {len(all_data)}")
 
         if len(all_data) == 0:
             print("No records found! Check if datasets are downloaded correctly.")
