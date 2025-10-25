@@ -1,196 +1,136 @@
-# rl/env.py
-from typing import Tuple, Dict, Any, Optional, List
 import gym
 from gym import spaces
 import numpy as np
-from PIL import Image, ImageEnhance, ImageFilter, ImageStat
+from PIL import Image, ImageEnhance, ImageFilter
 import random
 import os
 import tempfile
-import math
-import shutil
+from typing import Tuple, Dict, Any
+import cv2
 
-# Небольшая утилита для вычисления простых признаков изображения.
-def compute_image_features(image_path: str) -> Dict[str, float]:
-    """
-    Возвращает словарь признаков, соответствующих state_features.
-    Эти признаки — простые, быстрые к расчёту: яркость, контраст (approx), энтропия,
-    доля пересветов/недосветов, количество краёв (через градиент).
-    Для лучшей работы можно заменить на CNN-эмбеддинги или histogram-of-gradients.
-    """
-    img = Image.open(image_path).convert("RGB")
-    arr = np.asarray(img).astype(np.float32) / 255.0  # H x W x C, 0..1
-
-    # brightness: среднее по яркости (luma)
-    lum = 0.2126 * arr[..., 0] + 0.7152 * arr[..., 1] + 0.0722 * arr[..., 2]
-    brightness_score = float(np.clip(lum.mean(), 0.0, 1.0))
-
-    # contrast: std of luma
-    contrast_score = float(np.clip(lum.std(), 0.0, 1.0))
-
-    # saturation (approx): std across channels normalized
-    saturation = float(np.clip(arr.std(axis=(0, 1)).mean(), 0.0, 1.0))
-
-    # entropy (per-channel mean entropy)
-    def channel_entropy(channel):
-        # approximate using histogram
-        hist, _ = np.histogram(channel, bins=256, range=(0, 1))
-        p = hist / (hist.sum() + 1e-8)
-        p = p[p > 0]
-        return -float(np.sum(p * np.log2(p)))
-    entropy = (channel_entropy(arr[..., 0]) + channel_entropy(arr[..., 1]) + channel_entropy(arr[..., 2])) / 3.0
-    # normalize entropy to 0..1 (max entropy ~8 for 256 bins)
-    entropy_norm = float(np.clip(entropy / 8.0, 0.0, 1.0))
-
-    # edges: simple gradient magnitude mean (Sobel-free simple filter)
-    gx = np.abs(np.diff(lum, axis=1)).mean()
-    gy = np.abs(np.diff(lum, axis=0)).mean()
-    edge_score = float(np.clip((gx + gy) / 2.0 * 10.0, 0.0, 1.0))  # scaled approx
-
-    # over/underexposed ratio
-    over = float(np.mean(lum > 0.95))
-    under = float(np.mean(lum < 0.05))
-
-    # noise/blur proxies: laplacian variance ~ focus measure
-    try:
-        lap = np.var(lum - cv2.GaussianBlur(lum, (3, 3), 0))  # requires opencv if available
-        blur_score = float(np.clip(1.0 / (1.0 + lap), 0.0, 1.0))
-    except Exception:
-        # если нет cv2, используем simple proxy: inverse of edge_score
-        blur_score = float(np.clip(1.0 - edge_score, 0.0, 1.0))
-
-    # assemble features mapping to state_features in env
-    features = {
-        "quality_score": float((entropy_norm + contrast_score + edge_score) / 3.0),
-        "brightness_score": brightness_score,
-        "contrast_score": contrast_score,
-        "edge_score": edge_score,
-        "noise_score": 0.0,  # placeholder (could compute with wavelets)
-        "blur_score": blur_score,
-        "saturation": saturation,
-        "color_balance_bias": 0.0,  # placeholder: could use mean channel differences
-        "overexposed_ratio": over,
-        "underexposed_ratio": under,
-        "dynamic_range": float(np.clip(lum.max() - lum.min(), 0.0, 1.0)),
-        "is_low_entropy": float(entropy_norm < 0.2),
-        "has_color_cast": 0.0
-    }
-    return features
-
+# Отложенный импорт внутри функции
+def evaluate_single_image(*args, **kwargs):
+    from src.rl.eval import evaluate_single_image as eval_func
+    return eval_func(*args, **kwargs)
 
 class WasteRLMultiStepEnv(gym.Env):
     """
-    Gym-совместимая среда для RL, которая по шагам применяет предобработку к изображению,
-    пересчитывает признаки и возвращает обновлённые наблюдения.
-
-    Observation: numpy array shape (len(state_features),) с нормированными признаками 0..1
-    Action: discrete выбирает одну из предопределённых трансформаций
-    Episode: несколько действий (до max_steps) — затем терминальный сигнал (terminated=True)
+    Gym-среда для пошагового адаптивного препроцессинга изображения.
+    Каждый эпизод:
+      - выбирается случайная запись из manifest (строка с полями file_path/unified_class и пр.)
+      - агент имеет max_steps попыток применить дискретные действия к изображению
+      - после каждого действия вычисляется reward на основе классификатора (например, уверенность/корректность)
+    Observation:
+      Непрерывный вектор с признаками изображения (яркость, контраст, шум и т.п.)
+    Action:
+      Дискретный набор действий (brighten, darken, sharpen, denoise, crop, stop)
+    Возвращаемые значения:
+      reset(...) -> observation, info
+      step(action) -> observation, reward, terminated, truncated, info
     """
 
-    metadata = {"render.modes": ["human"]}
+    metadata = {"render.modes": []}
 
     def __init__(self,
                  manifest_df,
                  model,
                  device,
-                 class2idx: dict,
+                 class2idx,
                  data_root: str,
                  max_steps: int = 5):
         super().__init__()
-        self.df = manifest_df.reset_index(drop=True)  # pandas DataFrame
+
+        self.df = manifest_df.reset_index(drop=True)
         self.model = model
         self.device = device
         self.class2idx = class2idx
         self.data_root = data_root
-        self.max_steps = int(max_steps)
+        self.max_steps = max_steps
 
-        # features we compute & return as observation
+        # Список признаков, которые будут в observation (все в [0,1] после нормировки ниже)
         self.state_features = [
-            "quality_score", "brightness_score", "contrast_score", "edge_score",
-            "noise_score", "blur_score", "saturation", "color_balance_bias",
-            "overexposed_ratio", "underexposed_ratio", "dynamic_range",
-            "is_low_entropy", "has_color_cast"
+            "brightness", "contrast", "edge_strength",
+            "entropy", "mean_color_saturation", "noise_level"
         ]
 
+        # Дискретный набор действий. Включаем 'noop' и 'stop'.
         self.actions = [
-            "none", "brighten", "darken", "contrast_boost", "sharpen", "deblur",
-            "denoise", "saturation_boost", "color_balance", "exposure_fix", "crop_center"
+            "noop", "brighten", "darken", "contrast_boost",
+            "sharpen", "denoise_median", "saturation_boost",
+            "crop_center", "exposure_fix", "stop"
         ]
         self.action_space = spaces.Discrete(len(self.actions))
         self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(len(self.state_features),), dtype=np.float32)
 
-        # episode state
-        self.current_row = None              # pandas Series for the example
-        self.original_image_path: Optional[str] = None
-        self.current_image_path: Optional[str] = None  # path to the current (possibly temp) image
+        # Переменные эпизода
+        self.current_row = None
+        self.original_image_path = None
+        self.current_image_path = None
         self.true_label = None
         self.current_step = 0
-        self._temp_files: List[str] = []    # чтобы чистить временные файлы
+        self.terminated = False
+        self.truncated = False
 
-    # Gym-compatible reset signature (совместимо с Gym >=0.21)
-    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[np.ndarray, Dict]:
+    # Современный интерфейс gym.reset
+    def reset(self, *, seed: int = None, options: dict = None) -> Tuple[np.ndarray, Dict[str, Any]]:
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
+
         self.current_step = 0
+        self.terminated = False
+        self.truncated = False
+
         row = self.df.sample(1).iloc[0]
-        self.current_row = row.copy()
+        self.current_row = row
         self.true_label = row["unified_class"]
         self.original_image_path = os.path.join(self.data_root, row["file_path"])
+        # стартовое изображение — оригинал
         self.current_image_path = self.original_image_path
 
-        # compute features from the actual image (not from manifest fields)
-        feat = compute_image_features(self.current_image_path)
-        obs = np.array([feat[f] for f in self.state_features], dtype=np.float32)
-
-        info = {"step": self.current_step, "file_path": row["file_path"], "true_label": self.true_label}
-        return obs, info
+        # Состояние — вычисляемые признаки текущего изображения
+        obs = self._compute_image_features(self.current_image_path)
+        info = {"file_path": row["file_path"], "true_label": self.true_label}
+        return obs.astype(np.float32), info
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         """
-        Выполняет действие, применяет трансформацию к image, пересчитывает признаки.
-        Возвращает: observation, reward, terminated, truncated, info
+        Выполняем действие:
+          - применяем действие к текущему изображению (сохраняем во временный файл)
+          - оцениваем модель до и после (evaluate_single_image) -> формируем reward
+          - обновляем текущее изображение и состояние
+        Возвращаем observation, reward, terminated, truncated, info
         """
-        assert self.current_image_path is not None, "call reset() before step()"
-
-        action_idx = int(action)
-        action_name = self.actions[action_idx]
+        assert self.current_image_path is not None, "Call reset() before step()"
+        action_name = self.actions[int(action)]
         self.current_step += 1
 
-        # Оценка до действия
-        old_correct, old_conf, _ = evaluate_single_image(self.model, self.device, self.current_image_path,
-                                                         self.true_label, self.class2idx)
+        # Оценка до (accuracy 0/1 и confidence)
+        old_correct, old_conf, _ = evaluate_single_image(self.model, self.device, self.current_image_path, self.true_label, self.class2idx)
 
-        # Применяем действие — получаем новый временный файл
-        new_img_path = self._apply_action_to_image(self.current_image_path, action_name)
+        # Применяем действие (сохраняем в безопасный временный файл)
+        new_path = self._apply_action_to_image(self.current_image_path, action_name)
+        # обновляем текущий путь (следующее состояние основано на новом изображении)
+        self.current_image_path = new_path
 
-        # удаляем предыдущий временный файл (чтобы не накапливать), но не удаляем исходный файл
-        if self.current_image_path and self.current_image_path != self.original_image_path:
-            try:
-                if os.path.exists(self.current_image_path):
-                    os.remove(self.current_image_path)
-            except Exception:
-                pass
+        # Оценка после
+        new_correct, new_conf, _ = evaluate_single_image(self.model, self.device, self.current_image_path, self.true_label, self.class2idx)
 
-        self.current_image_path = new_img_path
+        # Reward: комбинация бинарного улучшения (0/1) и разницы уверенности.
+        # Эта формула даёт более плотную награду, чем только 0/1.
+        reward = (new_correct - old_correct) + (new_conf - old_conf)
+        # Малый штраф за шаг (чтобы поощрять короткие последовательности)
+        reward -= 0.01
 
-        # Оценка после действия
-        new_correct, new_conf, _ = evaluate_single_image(self.model, self.device, self.current_image_path,
-                                                         self.true_label, self.class2idx)
+        # Если действие stop — завершаем эпизод (terminated=True)
+        if action_name == "stop" or self.current_step >= self.max_steps:
+            self.terminated = True
 
-        # reward: сочетание улучшения correctness и подъёма confidence, минус штраф за шаг
-        reward = float((new_correct - old_correct) + (new_conf - old_conf))
-        step_penalty = -0.01
-        reward += step_penalty
+        # Ограничение по длине эпизода (truncated может быть True при time-limit)
+        self.truncated = self.current_step >= self.max_steps
 
-        # terminated = мы достигли максимума шагов
-        terminated = self.current_step >= self.max_steps
-        truncated = False
-
-        # recompute features from the new image to form next_state
-        feat = compute_image_features(self.current_image_path)
-        next_state = np.array([feat[f] for f in self.state_features], dtype=np.float32)
+        # Новое наблюдение — вычисляем признаки для нового текущего изображения
+        next_obs = self._compute_image_features(self.current_image_path)
 
         info = {
             "step": self.current_step,
@@ -198,19 +138,21 @@ class WasteRLMultiStepEnv(gym.Env):
             "reward": reward,
             "old_acc": old_correct,
             "new_acc": new_correct,
-            "old_conf": float(old_conf),
-            "new_conf": float(new_conf)
+            "old_conf": old_conf,
+            "new_conf": new_conf,
+            "file_path": self.current_row["file_path"]
         }
-        return next_state, reward, terminated, truncated, info
+
+        return next_obs.astype(np.float32), float(reward), bool(self.terminated), bool(self.truncated), info
 
     def _apply_action_to_image(self, image_path: str, action: str) -> str:
         """
-        Применяем действие к изображению и сохраняем во временный файл.
-        Возвращаем путь к новому временному файлу.
+        Простые детерминированные трансформации. Сохраняем результат во временный файл.
+        Возвращаем путь к новому изображению.
         """
         img = Image.open(image_path).convert("RGB")
 
-        if action == "none":
+        if action == "noop":
             out = img
         elif action == "brighten":
             out = ImageEnhance.Brightness(img).enhance(1.25)
@@ -219,40 +161,74 @@ class WasteRLMultiStepEnv(gym.Env):
         elif action == "contrast_boost":
             out = ImageEnhance.Contrast(img).enhance(1.3)
         elif action == "sharpen":
-            out = img.filter(ImageFilter.UnsharpMask(radius=1, percent=150, threshold=3))
-        elif action == "deblur":
-            out = img.filter(ImageFilter.UnsharpMask(radius=1, percent=100))
-        elif action == "denoise":
+            out = img.filter(ImageFilter.UnsharpMask(radius=1, percent=150))
+        elif action == "denoise_median":
             out = img.filter(ImageFilter.MedianFilter(size=3))
         elif action == "saturation_boost":
             out = ImageEnhance.Color(img).enhance(1.2)
-        elif action == "color_balance":
-            out = ImageEnhance.Color(img).enhance(1.05)
-        elif action == "exposure_fix":
-            out = ImageEnhance.Brightness(img).enhance(1.1)
         elif action == "crop_center":
             w, h = img.size
-            cx, cy = w // 2, h // 2
-            nw, nh = int(w * 0.9), int(h * 0.9)
-            box = (cx - nw // 2, cy - nh // 2, cx + nw // 2, cy + nh // 2)
-            out = img.crop(box).resize((w, h))
+            cw, ch = int(w * 0.9), int(h * 0.9)
+            left = (w - cw) // 2
+            top = (h - ch) // 2
+            out = img.crop((left, top, left + cw, top + ch)).resize((w, h))
+        elif action == "exposure_fix":
+            out = ImageEnhance.Brightness(img).enhance(1.05)
+        elif action == "stop":
+            out = img
         else:
             out = img
 
-        # Save to a temporary file
-        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-        tmp_path = tmp.name
+        # сохраняем во временный файл (удобно для параллельных эпизодов)
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg", prefix="rl_img_")
+        out.save(tmp.name, format="JPEG", quality=90)
         tmp.close()
-        out.save(tmp_path, quality=95)
-        self._temp_files.append(tmp_path)
-        return tmp_path
+        return tmp.name
 
-    def close(self):
-        # cleanup temp files
-        for p in list(self._temp_files):
-            try:
-                if os.path.exists(p):
-                    os.remove(p)
-            except Exception:
-                pass
-        self._temp_files = []
+    def _compute_image_features(self, image_path: str) -> np.ndarray:
+        """
+        Простая функция извлечения числовых признаков изображения.
+        Возвращает вектор длины len(self.state_features) в диапазоне [0,1].
+        Признаки (пример):
+          - brightness: средняя яркость
+          - contrast: стандартное отклонение яркости
+          - edge_strength: средняя величина градиента (cv2.Sobel)
+          - entropy: информационная энтропия гистограммы
+          - mean_color_saturation: средняя насыщенность в HSV
+          - noise_level: простой proxy — высокочастотная энергия (Laplacian)
+        """
+        img = cv2.imread(image_path)
+        if img is None:
+            # fallback — пустой вектор
+            return np.zeros(len(self.state_features), dtype=np.float32)
+
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+
+        # brightness and contrast proxy
+        brightness = float(np.clip(np.mean(gray), 0.0, 1.0))
+        contrast = float(np.clip(np.std(gray), 0.0, 1.0))
+
+        # edge_strength: средняя абсолютная величина градиента (Sobel)
+        gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        edge_strength = float(np.clip(np.mean(np.sqrt(gx*gx + gy*gy)), 0.0, 1.0))
+
+        # entropy (гистограмма)
+        hist = cv2.calcHist([gray], [0], None, [256], [0,1]).flatten()
+        hist = hist / (hist.sum() + 1e-9)
+        entropy = -float(np.sum([p * np.log2(p + 1e-9) for p in hist]))
+
+        # mean_color_saturation
+        hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV).astype(np.float32)
+        saturation = float(np.clip(np.mean(hsv[:,:,1]) / 255.0, 0.0, 1.0))
+
+        # noise_level proxy: variance of Laplacian
+        lap = cv2.Laplacian(gray, cv2.CV_32F)
+        noise_level = float(np.clip(np.var(lap), 0.0, 1.0))
+
+        vec = np.array([brightness, contrast, edge_strength, entropy / 8.0, saturation, noise_level], dtype=np.float32)
+        # нормировка entropy (пример) — entropy/8 чтобы быть ~в диапазоне [0,1] для typical images
+        vec = np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
+        vec = np.clip(vec, 0.0, 1.0)
+        return vec

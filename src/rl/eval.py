@@ -1,27 +1,41 @@
+# rl/eval.py
 import torch
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from collections import Counter
-from src.models.eval import load_model, get_transforms
+from ..models.eval import load_model, get_transforms
 from src.rl.env import WasteRLMultiStepEnv
 from src.rl.agent import DQNAgent
 import torch.nn.functional as F
 from PIL import Image
 
-def evaluate_single_image(model, device, image_path, true_label, class2idx, transform=get_transforms()):
-    image = Image.open(image_path).convert("RGB")   # читаем изображение в RGB
-    image_tensor = transform(image).unsqueeze(0).to(device)  # превращаем в батч из 1 элемента
+def evaluate_single_image(model, device, image_path, true_label, class2idx, transform=None):
+    """
+    Возвращает: (correct:int 0/1, confidence:float, predicted_idx:int)
+    transform: torchvision transforms object that converts PIL->tensor (если None, пытаемся получить get_transforms())
+    """
+    if transform is None:
+        try:
+            transform = get_transforms()
+        except Exception:
+            # fallback: простая конвертация в тензор (если нет torchvision)
+            from torchvision import transforms
+            transform = transforms.Compose([transforms.Resize((224,224)), transforms.ToTensor()])
 
+    image = Image.open(image_path).convert("RGB")
+    image_tensor = transform(image).unsqueeze(0).to(device)  # [1, C, H, W]
+
+    model.eval()
     with torch.no_grad():
-        outputs = model(image_tensor)               # предсказываем класс
-        probs = F.softmax(outputs, dim=1)           # превращаем логиты в вероятности
-        predicted_idx = torch.argmax(probs, dim=1).item()
+        outputs = model(image_tensor)               # [1, num_classes]
+        probs = F.softmax(outputs, dim=1)           # [1, num_classes]
+        predicted_idx = int(torch.argmax(probs, dim=1).item())
 
-    true_idx = class2idx[true_label]
-    correct = int(predicted_idx == true_idx)        # 1 если предсказал верно
-    confidence = probs[0, predicted_idx].item()     # вероятность предсказанного класса
+    true_idx = int(class2idx[true_label])
+    correct = int(predicted_idx == true_idx)
+    confidence = float(probs[0, predicted_idx].item())
 
     return correct, confidence, predicted_idx
 
@@ -31,7 +45,6 @@ def setup_paths():
     reports_dir.mkdir(exist_ok=True)
     return root, reports_dir
 
-
 def load_data(root):
     manifest_path = root / "data" / "unified" / "manifest.csv"
     df = pd.read_csv(manifest_path)
@@ -39,24 +52,44 @@ def load_data(root):
     class2idx = {c: i for i, c in enumerate(classes)}
     return df, classes, class2idx
 
-
 def load_models(root, df, classes, class2idx):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    agent_path = root / "src" / "models" / "rl_agent_multistep.pth"
-    data_root = root / "data" / "raw"
+    agent_path = root / "src" / "rl" / "rl_agent_multistep.pth"
+    
+    # Проверяем разные возможные пути к данным
+    possible_data_paths = [
+        root / "data" / "raw",
+        root / "data",
+        root / "data" / "unified"
+    ]
+    
+    data_root = None
+    for path in possible_data_paths:
+        if path.exists():
+            data_root = path
+            break
+    
+    if data_root is None:
+        raise FileNotFoundError(f"Data directory not found. Checked: {[str(p) for p in possible_data_paths]}")
+    
+    print(f"Using data root: {data_root}")  # для отладки
 
     baseline_model = load_model(device=device, num_classes=len(classes))
     
-    env = WasteRLMultiStepEnv(df, baseline_model, device, class2idx, str(data_root))
+    env = WasteRLMultiStepEnv(df, baseline_model, device, class2idx, data_root=str(data_root))
+    # action_dim fallback if env.action_space has no attribute n (type-checkers)
+    action_dim = int(getattr(env.action_space, "n", len(env.actions)))
     agent = DQNAgent(
-        state_dim=env.observation_space.shape[0],
-        action_dim=env.action_space.n
+        state_dim=int(env.observation_space.shape[0]),
+        action_dim=action_dim,
+        device=str(device)
     )
-    agent.load_state_dict(torch.load(agent_path, map_location=device))
+    # загружаем если есть
+    if (agent_path).exists():
+        agent.load(str(agent_path), map_location=device)
     agent.eval()
     
     return baseline_model, env, agent, device
-
 
 def run_evaluation(env, agent, baseline_model, device, class2idx, num_samples=50):
     baseline_correct = 0
@@ -64,9 +97,13 @@ def run_evaluation(env, agent, baseline_model, device, class2idx, num_samples=50
     all_actions = []
 
     for i in range(num_samples):
-        state = env.reset()
-        img_path = env.current_image_path
-        true_label = env.true_label
+        state, info = env.reset()
+        
+        # Получаем правильный путь к изображению
+        img_path = env.original_image_path  # используем путь из среды
+        true_label = env.true_label  # используем метку из среды
+
+        print(f"Processing image: {img_path}")  # для отладки
 
         base_correct, _, _ = evaluate_single_image(
             baseline_model, device, img_path, true_label, class2idx
@@ -74,13 +111,16 @@ def run_evaluation(env, agent, baseline_model, device, class2idx, num_samples=50
 
         done = False
         step_count = 0
+        # Эпизод: агент действует без эпсилона (детерминированно)
         while not done:
             action = agent.select_action(state, epsilon=0.0)
             all_actions.append(env.actions[action])
-            next_state, _, done, info = env.step(action)
+            next_state, reward, terminated, truncated, step_info = env.step(action)
             state = next_state
             step_count += 1
+            done = bool(terminated or truncated)
 
+        # Используем текущий путь после всех преобразований
         rl_correct_now, _, _ = evaluate_single_image(
             baseline_model, device, env.current_image_path, true_label, class2idx
         )
@@ -88,10 +128,9 @@ def run_evaluation(env, agent, baseline_model, device, class2idx, num_samples=50
         baseline_correct += base_correct
         rl_correct += rl_correct_now
 
-        print(f"[{i+1:03d}] Steps={step_count} | Baseline={base_correct} | RL={rl_correct_now}")
+        print(f"[{i+1:03d}] Steps={step_count} | Baseline={base_correct} | RL={rl_correct_now} | Image={Path(img_path).name}")
 
     return baseline_correct, rl_correct, num_samples, all_actions
-
 
 def save_results(baseline_acc, rl_acc, improvement, total, all_actions, reports_dir):
     print(f"\nBaseline Accuracy: {baseline_acc:.4f}")
@@ -105,8 +144,11 @@ def save_results(baseline_acc, rl_acc, improvement, total, all_actions, reports_
         f.write(f"Total Samples: {total}\n")
 
     action_counts = Counter(all_actions)
+    keys = list(action_counts.keys())
+    vals = list(action_counts.values())
+
     plt.figure(figsize=(10, 5))
-    plt.bar(action_counts.keys(), action_counts.values())
+    plt.bar(keys, vals)
     plt.xticks(rotation=45)
     plt.title("RL Agent Actions Distribution")
     plt.tight_layout()
@@ -115,14 +157,13 @@ def save_results(baseline_acc, rl_acc, improvement, total, all_actions, reports_
 
     print(f"Results saved to {reports_dir}")
 
-
-def evaluate_rl_vs_baseline():
+def evaluate_rl_vs_baseline(num_samples=50):
     root, reports_dir = setup_paths()
     df, classes, class2idx = load_data(root)
     baseline_model, env, agent, device = load_models(root, df, classes, class2idx)
     
     baseline_correct, rl_correct, total, all_actions = run_evaluation(
-        env, agent, baseline_model, device, class2idx
+        env, agent, baseline_model, device, class2idx, num_samples=num_samples
     )
     
     baseline_acc = baseline_correct / total
@@ -133,4 +174,4 @@ def evaluate_rl_vs_baseline():
 
 
 if __name__ == "__main__":
-    evaluate_rl_vs_baseline()
+    evaluate_rl_vs_baseline(num_samples=50)
