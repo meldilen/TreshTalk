@@ -1,87 +1,148 @@
 import torch
 import pandas as pd
-from baselines import build_resnet18
-from train import WasteDataset
-from torch.utils.data import DataLoader
-from torchvision import transforms
 import matplotlib.pyplot as plt
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, classification_report
 import numpy as np
 from PIL import Image
-import os
+from pathlib import Path
+from torch.utils.data import DataLoader
+from torchvision import transforms
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, classification_report
+from baselines import build_resnet18
+from train import WasteDataset
 
 
-# Prepare test transformations
-test_transforms = transforms.Compose([
-    transforms.Resize((224, 224)),            # Resize all images to 224x224
-    transforms.ToTensor(),                     # Convert images to tensor
-    transforms.Normalize([0.485, 0.456, 0.406], # Normalize using ImageNet stats
-                         [0.229, 0.224, 0.225])
-])
-
-# Load manifest CSV and create test dataset
-df = pd.read_csv("../../data/unified/manifest.csv")
-test_dataset = WasteDataset(df, split="test", transform=test_transforms)
-test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=0)
-
-class_names = test_dataset.classes  # Get class names
+def setup_environment():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    reports_dir = Path(__file__).parent / "reports"
+    reports_dir.mkdir(exist_ok=True)
+    return device, reports_dir
 
 
-# Load model
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-num_classes = len(class_names)
-model = build_resnet18(num_classes=num_classes, pretrained=False)
-model.load_state_dict(torch.load("baseline.pth", map_location=device))
-model.to(device)
-model.eval()  # Set model to evaluation mode
+def get_transforms():
+    return transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
 
 
-# Evaluate on test set
-correct, total = 0, 0
-all_labels, all_preds = [], []
-
-with torch.no_grad():  # Disable gradient computation
-    for images, labels in test_loader:
-        images, labels = images.to(device), labels.to(device)
-        outputs = model(images)
-        _, predicted = torch.max(outputs, 1)  # Get predicted class
-
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
-
-        all_labels.extend(labels.cpu().numpy())
-        all_preds.extend(predicted.cpu().numpy())
-
-test_acc = correct / total
-print(f"Test Accuracy: {test_acc:.4f}")
+def load_data():
+    current_dir = Path(__file__).parent
+    manifest_path = current_dir.parent.parent / "data" / "unified" / "manifest.csv"
+    
+    df = pd.read_csv(manifest_path)
+    test_dataset = WasteDataset(df, split="test", transform=get_transforms())
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=0)
+    return test_dataset, test_loader
 
 
-# Confusion Matrix
-cm = confusion_matrix(all_labels, all_preds)
-disp = ConfusionMatrixDisplay(cm, display_labels=class_names)
-plt.figure(figsize=(10,8))
-disp.plot(xticks_rotation=45, cmap='Blues')  # Plot confusion matrix
-plt.title("Confusion Matrix")
-plt.show()
+def load_model(device, num_classes):
+    current_dir = Path(__file__).parent
+    model_path = current_dir / "baseline.pth"
+    
+    model = build_resnet18(num_classes=num_classes, pretrained=False)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.to(device)
+    model.eval()
+    return model
 
 
-# Classification Report
-report = classification_report(all_labels, all_preds, target_names=class_names)
-print("\nClassification Report:\n", report)
+def evaluate_model(model, test_loader, device):
+    correct, total = 0, 0
+    all_labels, all_preds = [], []
+
+    with torch.no_grad():
+        for images, labels in test_loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            _, predicted = torch.max(outputs, 1)
+
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(predicted.cpu().numpy())
+
+    test_acc = correct / total
+    print(f"Test Accuracy: {test_acc:.4f}")
+    
+    return np.array(all_labels), np.array(all_preds), test_acc
 
 
-#  Show examples of misclassified images
-all_labels = np.array(all_labels)
-all_preds = np.array(all_preds)
-wrong_idx = np.where(all_labels != all_preds)[0]  # Indices of wrong predictions
+def save_confusion_matrix(labels, preds, class_names, reports_dir):
+    cm = confusion_matrix(labels, preds)
+    disp = ConfusionMatrixDisplay(cm, display_labels=class_names)
+    
+    plt.figure(figsize=(10, 8))
+    disp.plot(xticks_rotation=45, cmap='Blues')
+    plt.title("Confusion Matrix")
+    plt.tight_layout()
+    plt.savefig(reports_dir / "confusion_matrix.png", dpi=300, bbox_inches='tight')
+    plt.close()
 
-if len(wrong_idx) > 0:
-    print(f"\nShowing {min(5, len(wrong_idx))} examples of misclassified images:\n")
-    for i in np.random.choice(wrong_idx, size=min(5, len(wrong_idx)), replace=False):
-        img_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "raw", test_dataset.df.iloc[i]['file_path'])
-        img_path = os.path.normpath(img_path)
+
+def save_classification_report(labels, preds, class_names, reports_dir):
+    report = classification_report(labels, preds, target_names=class_names)
+    
+    with open(reports_dir / "classification_report.txt", "w") as f:
+        f.write(report)
+
+
+def save_misclassified_examples(labels, preds, test_dataset, class_names, reports_dir, num_examples=5):
+    wrong_idx = np.where(labels != preds)[0]
+    
+    if len(wrong_idx) == 0:
+        print("No misclassified images found")
+        return
+
+    num_examples = min(num_examples, len(wrong_idx))
+    selected_indices = np.random.choice(wrong_idx, size=num_examples, replace=False)
+    
+    current_dir = Path(__file__).parent
+    
+    fig, axes = plt.subplots(1, num_examples, figsize=(15, 3))
+    if num_examples == 1:
+        axes = [axes]
+    
+    for i, idx in enumerate(selected_indices):
+        img_relative_path = test_dataset.df.iloc[idx]['file_path']
+        img_path = current_dir.parent.parent / "data" / "raw" / img_relative_path
+        
         img = Image.open(img_path).convert("RGB")
-        plt.imshow(img)  # Show image
-        plt.title(f"True: {class_names[all_labels[i]]}, Pred: {class_names[all_preds[i]]}")
-        plt.axis('off')
-        plt.show()
+        
+        axes[i].imshow(img)
+        axes[i].set_title(f"True: {class_names[labels[idx]]}\nPred: {class_names[preds[idx]]}")
+        axes[i].axis('off')
+    
+    plt.tight_layout()
+    plt.savefig(reports_dir / "misclassified_examples.png", dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def save_results_summary(accuracy, reports_dir):
+    summary = f"Test Results Summary\n{'='*20}\nAccuracy: {accuracy:.4f}\n"
+    
+    with open(reports_dir / "results_summary.txt", "w") as f:
+        f.write(summary)
+
+
+def main():
+    device, reports_dir = setup_environment()
+    
+    test_dataset, test_loader = load_data()
+    class_names = test_dataset.classes
+    
+    model = load_model(device, len(class_names))
+    
+    labels, preds, accuracy = evaluate_model(model, test_loader, device)
+    
+    save_confusion_matrix(labels, preds, class_names, reports_dir)
+    save_classification_report(labels, preds, class_names, reports_dir)
+    save_misclassified_examples(labels, preds, test_dataset, class_names, reports_dir)
+    save_results_summary(accuracy, reports_dir)
+    
+    print(f"All results saved to '{reports_dir}'")
+
+
+if __name__ == "__main__":
+    main()
