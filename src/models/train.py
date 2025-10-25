@@ -59,7 +59,10 @@ class WasteDataset(Dataset):
 
 if __name__ == "__main__":
     # Load manifest and create loaders 
-    df = pd.read_csv("../../data/unified/manifest.csv")
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    manifest_path = os.path.join(project_root, "data", "unified", "manifest.csv")
+    
+    df = pd.read_csv(manifest_path)
 
     train_dataset = WasteDataset(df, split="train", transform=train_transforms)
     val_dataset = WasteDataset(df, split="val", transform=val_transforms)
