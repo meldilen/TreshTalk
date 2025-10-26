@@ -6,7 +6,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import transforms
 import pandas as pd
-from baselines import build_resnet18
+from src.models.baselines import build_resnet18
 from PIL import Image
 from torch.utils.data import Dataset
 

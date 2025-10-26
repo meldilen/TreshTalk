@@ -7,8 +7,8 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, classification_report
-from baselines import build_resnet18
-from train import WasteDataset
+from src.models.baselines import build_resnet18
+from src.models.train import WasteDataset
 
 
 def setup_environment():
