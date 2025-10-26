@@ -1,4 +1,4 @@
-Baseline Accuracy: 0.9400
-RL Accuracy: 0.9000
-Improvement: -0.0400
-Total Samples: 50
+Baseline Accuracy: 0.9470
+RL Accuracy: 0.9490
+Improvement: +0.0020
+Total Samples: 1000

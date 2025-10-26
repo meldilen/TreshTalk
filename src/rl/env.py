@@ -1,4 +1,4 @@
-import gym
+import gymnasium as gym
 from gym import spaces
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter
@@ -94,43 +94,63 @@ class WasteRLMultiStepEnv(gym.Env):
         return obs.astype(np.float32), info
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
-        """
-        Выполняем действие:
-          - применяем действие к текущему изображению (сохраняем во временный файл)
-          - оцениваем модель до и после (evaluate_single_image) -> формируем reward
-          - обновляем текущее изображение и состояние
-        Возвращаем observation, reward, terminated, truncated, info
-        """
         assert self.current_image_path is not None, "Call reset() before step()"
         action_name = self.actions[int(action)]
         self.current_step += 1
 
-        # Оценка до (accuracy 0/1 и confidence)
-        old_correct, old_conf, _ = evaluate_single_image(self.model, self.device, self.current_image_path, self.true_label, self.class2idx)
+        # --- Оценка до ---
+        old_correct, old_conf, _ = evaluate_single_image(
+            self.model, self.device, self.current_image_path, self.true_label, self.class2idx
+        )
 
-        # Применяем действие (сохраняем в безопасный временный файл)
+        old_features = self._compute_image_features(self.current_image_path)
+
+        # --- Применяем действие ---
         new_path = self._apply_action_to_image(self.current_image_path, action_name)
-        # обновляем текущий путь (следующее состояние основано на новом изображении)
         self.current_image_path = new_path
 
-        # Оценка после
-        new_correct, new_conf, _ = evaluate_single_image(self.model, self.device, self.current_image_path, self.true_label, self.class2idx)
+        # --- Оценка после ---
+        new_correct, new_conf, _ = evaluate_single_image(
+            self.model, self.device, self.current_image_path, self.true_label, self.class2idx
+        )
 
-        # Reward: комбинация бинарного улучшения (0/1) и разницы уверенности.
-        # Эта формула даёт более плотную награду, чем только 0/1.
-        reward = (new_correct - old_correct) + (new_conf - old_conf)
-        # Малый штраф за шаг (чтобы поощрять короткие последовательности)
-        reward -= 0.01
+        new_features = self._compute_image_features(self.current_image_path)
 
-        # Если действие stop — завершаем эпизод (terminated=True)
-        if action_name == "stop" or self.current_step >= self.max_steps:
-            self.terminated = True
+        # --- Reward-система ---
+        reward = 0.0
 
-        # Ограничение по длине эпизода (truncated может быть True при time-limit)
+        # 1️⃣ Большой бонус за изменение правильности предсказания
+        if new_correct > old_correct:
+            reward += 1.0   # стало правильно
+        elif new_correct < old_correct:
+            reward -= 1.0   # испортил классификацию
+
+        # 2️⃣ Усиленный бонус за рост уверенности
+        reward += 3.0 * (new_conf - old_conf)
+
+        # 3️⃣ Мягкий бонус за улучшение визуальных признаков
+        # меньше шума, выше контраст и яркость
+        reward += 0.5 * (new_features[1] - old_features[1])  # contrast
+        reward += 0.2 * (new_features[0] - old_features[0])  # brightness
+        reward -= 0.3 * (new_features[5] - old_features[5])  # noise_level (меньше = лучше)
+
+        # 4️⃣ Штраф за длинные последовательности действий
+        reward -= 0.01 * self.current_step
+
+        # 5️⃣ Штраф за слишком ранний stop
+        if action_name == "stop" and self.current_step == 1:
+            reward -= 0.1
+
+        # 6️⃣ Reward clipping, чтобы стабилизировать обучение
+        reward = float(np.clip(reward, -1.0, 1.0))
+
+
+        # Завершаем эпизод при stop или max_steps
+        self.terminated = action_name == "stop"
         self.truncated = self.current_step >= self.max_steps
 
-        # Новое наблюдение — вычисляем признаки для нового текущего изображения
-        next_obs = self._compute_image_features(self.current_image_path)
+        # Новое наблюдение
+        next_obs = new_features
 
         info = {
             "step": self.current_step,
@@ -185,6 +205,7 @@ class WasteRLMultiStepEnv(gym.Env):
         tmp.close()
         return tmp.name
 
+    # мы используем это до и в процессе изменений чтобы трекать что изменилось
     def _compute_image_features(self, image_path: str) -> np.ndarray:
         """
         Простая функция извлечения числовых признаков изображения.
@@ -198,9 +219,6 @@ class WasteRLMultiStepEnv(gym.Env):
           - noise_level: простой proxy — высокочастотная энергия (Laplacian)
         """
         img = cv2.imread(image_path)
-        if img is None:
-            # fallback — пустой вектор
-            return np.zeros(len(self.state_features), dtype=np.float32)
 
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0

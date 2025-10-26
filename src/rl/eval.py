@@ -12,18 +12,8 @@ import torch.nn.functional as F
 from PIL import Image
 
 def evaluate_single_image(model, device, image_path, true_label, class2idx, transform=None):
-    """
-    Возвращает: (correct:int 0/1, confidence:float, predicted_idx:int)
-    transform: torchvision transforms object that converts PIL->tensor (если None, пытаемся получить get_transforms())
-    """
     if transform is None:
-        try:
-            transform = get_transforms()
-        except Exception:
-            # fallback: простая конвертация в тензор (если нет torchvision)
-            from torchvision import transforms
-            transform = transforms.Compose([transforms.Resize((224,224)), transforms.ToTensor()])
-
+        transform = get_transforms()
     image = Image.open(image_path).convert("RGB")
     image_tensor = transform(image).unsqueeze(0).to(device)  # [1, C, H, W]
 
@@ -99,11 +89,8 @@ def run_evaluation(env, agent, baseline_model, device, class2idx, num_samples=50
     for i in range(num_samples):
         state, info = env.reset()
         
-        # Получаем правильный путь к изображению
-        img_path = env.original_image_path  # используем путь из среды
-        true_label = env.true_label  # используем метку из среды
-
-        print(f"Processing image: {img_path}")  # для отладки
+        img_path = env.original_image_path
+        true_label = env.true_label
 
         base_correct, _, _ = evaluate_single_image(
             baseline_model, device, img_path, true_label, class2idx
@@ -111,6 +98,7 @@ def run_evaluation(env, agent, baseline_model, device, class2idx, num_samples=50
 
         done = False
         step_count = 0
+
         # Эпизод: агент действует без эпсилона (детерминированно)
         while not done:
             action = agent.select_action(state, epsilon=0.0)
@@ -174,4 +162,4 @@ def evaluate_rl_vs_baseline(num_samples=50):
 
 
 if __name__ == "__main__":
-    evaluate_rl_vs_baseline(num_samples=50)
+    evaluate_rl_vs_baseline(num_samples=1000)

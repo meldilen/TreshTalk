@@ -37,23 +37,27 @@ class DQNAgent(nn.Module):
         return self.q_net(x)
 
     def select_action(self, state, epsilon: float = 0.1) -> int:
-        """
-        Эпсилон-жадный выбор действия.
-        state: numpy array или torch tensor (1D)
-        """
+        # 🔹 иногда чуть усиливаем исследование (чтобы не залипать на stop)
+        epsilon = max(epsilon, 0.05)  # нижний порог
         if random.random() < epsilon:
-            return int(random.randrange(self.action_dim))  # случайное действие
+            action = random.randrange(self.action_dim)
+            return int(action)
 
-        # детерминированный выбор по сети
-        if not isinstance(state, torch.Tensor):
-            state_t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
-        else:
+        # 🔹 подготовка состояния
+        if isinstance(state, np.ndarray):
+            state_t = torch.from_numpy(state).float().to(self.device).unsqueeze(0)
+        elif isinstance(state, torch.Tensor):
             state_t = state.float().to(self.device).unsqueeze(0)
+        else:
+            state_t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
 
+        # 🔹 вычисляем Q-значения без градиентов
         with torch.no_grad():
-            q_values = self.q_net(state_t)  # shape [1, action_dim]
+            q_values = self.q_net(state_t)  # shape: [1, action_dim]
             action = int(torch.argmax(q_values, dim=1).item())
+
         return action
+
 
     def update(self, state, action: int, reward: float, next_state, done: bool):
         """
@@ -77,7 +81,7 @@ class DQNAgent(nn.Module):
             next_q_max = torch.max(next_q_vals, dim=1)[0]  # [1]
             target = reward_t + self.gamma * next_q_max * (1.0 - done_mask)
 
-        loss = self.loss_fn(q_val, target.detach())  # scalar
+        loss = self.loss_fn(q_val.unsqueeze(0), target.detach())  # .unsqueeze(0) чтобы не приходило от пайторча ошибки
 
         self.optimizer.zero_grad()
         loss.backward()
