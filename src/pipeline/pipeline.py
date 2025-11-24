@@ -1,3 +1,4 @@
+import os
 import torch
 import cv2
 import numpy as np
@@ -6,7 +7,7 @@ from typing import List, Dict, Optional, Tuple
 import json
 from datetime import datetime
 
-from src.detection.detector import CVDetector
+from src.detection.detector import GroundingDINODetector
 from src.models.baselines import MODEL_BUILDERS
 
 
@@ -14,10 +15,10 @@ class WasteDetectionClassificationPipeline:
     """
     Complete waste detection and classification pipeline
     Implements the desired workflow:
-    Input Image → CV Detector → Bounding Boxes + Crops → Classifier → Results
+    Input Image → GroundingDINO Detector → Bounding Boxes + Crops → Classifier → Results
     """
     
-    def __init__(self, detector: CVDetector, classifier_model, 
+    def __init__(self, detector: GroundingDINODetector, classifier_model, 
                  class_names: List[str], device: str):
         """
         Initialize pipeline
@@ -86,12 +87,13 @@ class WasteDetectionClassificationPipeline:
                     
                     if confidence_value >= classification_confidence:
                         result = {
-                            'object_id': i + 1,
-                            'bbox': bbox.tolist() if isinstance(bbox, np.ndarray) else bbox,
+                            'object_id': int(i + 1),
+                            'bbox': bbox.tolist() if isinstance(bbox, np.ndarray) else list(map(int, bbox)),
                             'class': class_name,
-                            'class_id': predicted_class,
-                            'confidence': confidence_value,
+                            'class_id': int(predicted_class),  
+                            'confidence': float(confidence_value), 
                         }
+
                         classification_results.append(result)
                         
                         print(f"   Object {i+1}: {class_name} ({confidence_value:.3f})")
@@ -141,11 +143,14 @@ class WasteDetectionClassificationPipeline:
         Returns:
             Annotated image
         """
-        # Load original image
+        # Load image
+        image_path = os.path.normpath(image_path)  # нормализация пути
         image = cv2.imread(image_path)
-        if image is None:
-            raise ValueError(f"Could not load image from {image_path}")
         
+        if image is None:
+            raise ValueError(f"Could not load image from {image_path}. "
+                             f"Check if file exists and path is correct.")
+
         # Create copy for annotation
         annotated_image = image.copy()
         
@@ -240,26 +245,33 @@ def create_complete_pipeline(device: str = None) -> WasteDetectionClassification
     
     # Step 1: Load classifier model
     print("Step 1: Loading classifier model...")
-    model_path = Path(__file__).parent.parent / "models" / "best_model.pth"
-    
+
+    model_path = Path(__file__).resolve().parent.parent / "models" / "baseline.pth"
     if not model_path.exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
-    
-    checkpoint = torch.load(model_path, map_location=device)
-    model_name = checkpoint.get('model_name', 'resnet18')
-    
+
+    # Укажи свою архитектуру!
+    model_name = "resnet18"
+
+    # Создаём пустую модель
     classifier = MODEL_BUILDERS[model_name](
-        num_classes=len(class_names), 
+        num_classes=len(class_names),
         pretrained=False
     )
-    classifier.load_state_dict(checkpoint['state_dict'])
+
+    # Загружаем веса
+    state_dict = torch.load(model_path, map_location=device)
+    classifier.load_state_dict(state_dict)
+
     classifier.to(device)
     classifier.eval()
+
     print(f"Classifier loaded: {model_name}")
+
     
     # Step 2: Initialize detector
     print("Step 2: Initializing detector...")
-    detector = CVDetector(device=device)
+    detector = GroundingDINODetector(device=device)
     
     # Step 3: Create pipeline
     print("Step 3: Creating pipeline...")

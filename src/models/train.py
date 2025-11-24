@@ -39,9 +39,9 @@ class WasteDataset(Dataset):
     def __len__(self):
         return len(self.df)
 
-    def __getitem__(self, idx): # берем из raw, превращаем в rgb, возращаем рещультат и класс
+    def __getitem__(self, idx):
         row = self.df.iloc[idx]
-
+    
         project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         data_root = os.path.join(project_root, "data", "raw")
         file_path = os.path.join(data_root, row['file_path'])
@@ -53,7 +53,10 @@ class WasteDataset(Dataset):
         label = self.class2idx[row['unified_class']]
         if self.transform:
             image = self.transform(image)
-        return image, label
+    
+        # Возвращаем кортеж с image_path
+        return image, label, file_path
+
 
 
 

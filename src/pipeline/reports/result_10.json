@@ -1,0 +1,26 @@
+{
+  "image_path": "C:\\Users\\Джамиля\\Documents\\project file\\uni\\y3s1\\PMLDL\\TreshTalk\\data\\raw\\trashnet\\dataset-resized\\cardboard\\cardboard180.jpg",
+  "timestamp": "2025-11-24T18:38:56.570671",
+  "detection_stats": {
+    "total_detected": 1,
+    "total_classified": 1,
+    "classification_confidence_threshold": 0.5
+  },
+  "objects": [
+    {
+      "object_id": 1,
+      "bbox": [
+        0,
+        61,
+        452,
+        384
+      ],
+      "class": "plastic",
+      "class_id": 2,
+      "confidence": 0.999745786190033
+    }
+  ],
+  "class_distribution": {
+    "plastic": 1
+  }
+}

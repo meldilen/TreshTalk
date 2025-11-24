@@ -1,0 +1,51 @@
+{
+  "image_path": "C:\\Users\\Джамиля\\Documents\\project file\\uni\\y3s1\\PMLDL\\TreshTalk\\data\\raw\\trashnet\\dataset-resized\\cardboard\\cardboard139.jpg",
+  "timestamp": "2025-11-24T18:36:15.215578",
+  "detection_stats": {
+    "total_detected": 3,
+    "total_classified": 3,
+    "classification_confidence_threshold": 0.5
+  },
+  "objects": [
+    {
+      "object_id": 1,
+      "bbox": [
+        251,
+        286,
+        283,
+        384
+      ],
+      "class": "battery",
+      "class_id": 6,
+      "confidence": 0.9238459467887878
+    },
+    {
+      "object_id": 2,
+      "bbox": [
+        193,
+        161,
+        236,
+        225
+      ],
+      "class": "trash",
+      "class_id": 5,
+      "confidence": 0.520932137966156
+    },
+    {
+      "object_id": 3,
+      "bbox": [
+        244,
+        97,
+        293,
+        258
+      ],
+      "class": "battery",
+      "class_id": 6,
+      "confidence": 0.6718997955322266
+    }
+  ],
+  "class_distribution": {
+    "battery": 2,
+    "trash": 1
+  }
+}

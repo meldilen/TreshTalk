@@ -1,150 +1,135 @@
+import torch
 import cv2
 import numpy as np
-import torch
+from PIL import Image
+import supervision as sv
 import torchvision.transforms as transforms
 from typing import List, Tuple
-import supervision as sv
+import os
 
-class CVDetector:
+import sys
+
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+groundingdino_path = os.path.join(project_root, "GroundingDINO")
+if groundingdino_path not in sys.path:
+    sys.path.insert(0, groundingdino_path)
+
+class GroundingDINODetector:
     """
-    Traditional Computer Vision detector for waste objects
-    Uses classical CV techniques: edge detection, contour analysis, morphological operations
+    Object detector using Grounding DINO for waste detection
     """
-    
-    def __init__(self, min_area: int = 1000, device: str = "cpu"):
-        self.min_area = min_area
+
+    def __init__(self,
+                 model_config: str = os.path.join(project_root, "GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"),
+                 model_checkpoint: str = os.path.join(project_root, "GroundingDINO/weights/groundingdino_swint_ogc.pth"),
+                 device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+        """
+        Initialize Grounding DINO detector
+        """
         self.device = device
-        
-        # Image preprocessing transform for classifier
+        self.model = self.load_model(model_config, model_checkpoint)
+        self.text_prompt = "waste . trash . garbage . rubbish . litter"
+        self.box_threshold = 0.35
+        self.text_threshold = 0.25
+
+        # Image preprocessing for classifier later
         self.transform = transforms.Compose([
-            transforms.ToPILImage(),
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            transforms.Normalize([0.485, 0.456, 0.406],
+                                 [0.229, 0.224, 0.225])
         ])
-        
-        print("Traditional CV Detector initialized")
-    
-    def detect(self, image: np.ndarray) -> Tuple[object, np.ndarray, List[str]]:
+
+    def set_detection_parameters(self, box_threshold: float = None, text_threshold: float = None):
+        if box_threshold is not None:
+            self.box_threshold = box_threshold
+        if text_threshold is not None:
+            self.text_threshold = text_threshold
+
+    def load_model(self, model_config: str, model_checkpoint: str):
         """
-        Detect waste objects using traditional CV methods
-        
-        Args:
-            image: Input image as numpy array (BGR format)
-            
-        Returns:
-            detections: Detection results in supervision format
-            annotated_image: Image with bounding boxes
-            labels: Detected object labels (all 'waste' for now)
+        Load Grounding DINO model
         """
-        # 1. Convert to grayscale
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
-        # 2. Gaussian blur to reduce noise
-        blurred = cv2.GaussianBlur(gray, (7, 7), 0)
-        
-        # 3. Edge detection using Canny
-        edges = cv2.Canny(blurred, 50, 150)
-        
-        # 4. Morphological operations to close gaps
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-        
-        # 5. Find contours
-        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # Prepare detections in supervision format
-        bboxes = []
-        confidences = []
-        labels_list = []
-        
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area > self.min_area:
-                x, y, w, h = cv2.boundingRect(contour)
-                bboxes.append([x, y, x + w, y + h])
-                confidence = min(area / 10000, 1.0)  # Confidence based on size
-                confidences.append(confidence)
-                labels_list.append("waste")
-        
-        if len(bboxes) == 0:
-            # Return empty detections in supervision format
-            empty_detections = sv.Detections(
-                xyxy=np.array([], dtype=np.float32).reshape(0, 4),
-                confidence=np.array([], dtype=np.float32),
-                class_id=np.array([], dtype=np.int32)
+        try:
+            from GroundingDINO.groundingdino.util.inference import Model
+
+            model = Model(
+                model_config_path=model_config,
+                model_checkpoint_path=model_checkpoint,
+                device=self.device
             )
-            return empty_detections, image.copy(), []
-        
-        # Convert to numpy arrays
-        bboxes_np = np.array(bboxes, dtype=np.float32)
-        confidences_np = np.array(confidences, dtype=np.float32)
-        class_ids = np.zeros(len(bboxes), dtype=np.int32)  # All class 0 for waste
-        
-        # Create supervision Detections object
-        detections = sv.Detections(
-            xyxy=bboxes_np,
-            confidence=confidences_np,
-            class_id=class_ids
+            print("✅ Grounding DINO model loaded successfully")
+            return model
+        except ImportError:
+            raise ImportError("Grounding DINO not installed. "
+                              "Install from https://github.com/IDEA-Research/GroundingDINO")
+        except Exception as e:
+            raise Exception(f"Failed to load Grounding DINO model: {e}")
+
+    def detect(self, image: np.ndarray) -> Tuple[sv.Detections, np.ndarray, List[str]]:
+        """
+        Detect waste objects in image
+        """
+        # Convert BGR to RGB once
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # Run Grounding DINO (expects BGR image!)
+        detections, phrases = self.model.predict_with_caption(
+            image=image,  # pass original BGR image
+            caption=self.text_prompt,
+            box_threshold=self.box_threshold,
+            text_threshold=self.text_threshold
         )
-        
-        # Annotate image with bounding boxes
-        box_annotator = sv.BoxAnnotator()
+
+        # Create annotator with INDEX-based colors (since no class_id)
+        box_annotator = sv.BoxAnnotator(color_lookup=sv.ColorLookup.INDEX)
+
+        # Create nice labels
+        labels = [
+            f"{phrase} {conf:.2f}"
+            for phrase, conf in zip(phrases, detections.confidence)
+        ]
+
+        # Annotate
         annotated_image = box_annotator.annotate(
-            scene=image.copy(),
-            detections=detections,
-            labels=labels_list
+            scene=image_rgb.copy(),
+            detections=detections
         )
-        
-        return detections, annotated_image, labels_list
-    
-    def extract_object_crops(self, image: np.ndarray, detections) -> List[Tuple[np.ndarray, List[float]]]:
+
+        # Convert back to BGR for OpenCV compatibility
+        annotated_image_bgr = cv2.cvtColor(annotated_image, cv2.COLOR_RGB2BGR)
+
+        # Return phrases as string labels
+        label_strings = [str(p) for p in phrases]
+
+        return detections, annotated_image_bgr, label_strings
+
+    def extract_object_crops(self, image: np.ndarray, detections) -> List[Tuple[np.ndarray, List[int]]]:
         """
         Extract cropped images of detected objects
-        
-        Args:
-            image: Original image
-            detections: Detection results from detect() method
-            
-        Returns:
-            List of tuples (cropped_image, bbox_coordinates)
         """
         crops = []
-        
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
         for bbox in detections.xyxy:
             x1, y1, x2, y2 = bbox.astype(int)
-            
+
             # Ensure coordinates are within image bounds
             x1 = max(0, x1)
             y1 = max(0, y1)
             x2 = min(image.shape[1], x2)
             y2 = min(image.shape[0], y2)
-            
-            # Extract crop (keep in BGR for OpenCV)
-            crop = image[y1:y2, x1:x2]
-            
-            if crop.size > 0:  # Ensure crop is not empty
+
+            crop = image_rgb[y1:y2, x1:x2]
+
+            if crop.size > 0:
                 crops.append((crop, [x1, y1, x2, y2]))
-        
+
         return crops
-    
+
     def preprocess_crop(self, crop: np.ndarray) -> torch.Tensor:
         """
         Preprocess crop for classification
-        
-        Args:
-            crop: Cropped image as numpy array (BGR format)
-            
-        Returns:
-            Preprocessed tensor
         """
-        # Convert BGR to RGB for PyTorch models
-        crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-        return self.transform(crop_rgb).unsqueeze(0).to(self.device)
-    
-    def set_detection_parameters(self, min_area: float = None):
-        """
-        Update detection parameters
-        """
-        if min_area is not None:
-            self.min_area = min_area
+        pil_image = Image.fromarray(crop)
+        return self.transform(pil_image).unsqueeze(0).to(self.device)

@@ -1,0 +1,11 @@
+{
+  "image_path": "C:\\Users\\Джамиля\\Documents\\project file\\uni\\y3s1\\PMLDL\\TreshTalk\\data\\raw\\trashnet\\dataset-resized\\cardboard\\cardboard113.jpg",
+  "timestamp": "2025-11-24T20:06:28.398958",
+  "detection_stats": {
+    "total_detected": 0,
+    "total_classified": 0,
+    "classification_confidence_threshold": 0.5
+  },
+  "objects": [],
+  "class_distribution": {}
+}
